@@ -38,130 +38,90 @@ ifstream fin(kInputFilename);
 ofstream fout(kOutputFilename);
 
 
-inline int ToIdx(char c) {
-  return c - 'a';
-}
+struct State {
+  // range of substrings.
+  int max_length_ = 0;
+  int min_length_ = 0;
 
+  // first endpoint.
+  int endpoint_ = -1;
 
-struct SAMNode {
-  // longest(v)
-  int length_ = 0;
   // suffix link
-  SAMNode *parent_ = nullptr;
+  State *suffix_link_ = nullptr;
+
   // transitions a-z.
-  vector<SAMNode *> children_{26, nullptr};
+  unordered_map<char, State *> trans_;
 };
 
 
-SAMNode *AddedLastCharacterToSAM(SAMNode *root, SAMNode *last, char c) {
-  auto cur = new SAMNode;
-  cur->length_ = last->length_ + 1;
+State *AddedLastCharacterToSAM(State *root, State *last, char c) {
+  auto cur = new State;
+  cur->max_length_ = last->max_length_ + 1;
+  cur->endpoint_ = last->endpoint_ + 1;
 
   auto p = last;
-  while (p && !p->children_[ToIdx(c)]) {
-    p->children_[ToIdx(c)] = cur;
-    p = p->parent_;
+  while (p && p->trans_.count(c) == 0) {
+    p->trans_[c] = cur;
+    cur->min_length_ = p->min_length_ + 1;
+    p = p->suffix_link_;
   }
 
   if (p == nullptr) {
-    cur->parent_ = root;
+    cur->suffix_link_ = root;
   } else {
-    auto q = p->children_[ToIdx(c)];
-    if (p->length_ + 1 == q->length_) {
+    auto q = p->trans_[c];
+    if (p->max_length_ + 1 == q->max_length_) {
       // continue.
-      cur->parent_ = q;
+      cur->suffix_link_ = q;
     } else {
       // discontinue.
-      auto split_q = new SAMNode;
+      auto split_q = new State;
 
-      split_q->length_ = p->length_ + 1;
-      split_q->parent_ = q->parent_;
-      split_q->children_ = q->children_;
+      split_q->max_length_ = p->max_length_ + 1;
+      split_q->endpoint_ = q->endpoint_;
 
-      while (p && p->children_[ToIdx(c)] == q) {
-        p->children_[ToIdx(c)] = split_q;
-        p = p->parent_;
+      split_q->suffix_link_ = q->suffix_link_;
+      split_q->trans_ = q->trans_;
+
+      while (p && p->trans_.count(c) > 0 && p->trans_[c] == q) {
+        p->trans_[c] = split_q;
+        split_q->min_length_ = p->min_length_ + 1;
+        p = p->suffix_link_;
       }
 
-      q->parent_ = split_q;
-      cur->parent_ = split_q;
+      q->suffix_link_ = split_q;
+      q->min_length_ = split_q->max_length_ + 1;
+
+      cur->suffix_link_ = split_q;
     }
   }
   return cur;
 }
 
 
-void PrintSAMNode(SAMNode *node) {
-  cout << "--------------------------------" << endl;
-  cout << "ptr: " << node << endl;
-  cout << "parent: " << node->parent_ << endl;
-  cout << "length: " << node->length_ << endl;
-  for (char c = 'a'; c <= 'z'; ++c) {
-    auto child = node->children_[ToIdx(c)];
-    if (child) {
-      cout << "child " << c << ": " << child << endl;
-    }
-  }
-}
-
-
-void PrintSAMTree(SAMNode *root) {
-  vector<SAMNode *> cur_level, next_level;
-  unordered_set<SAMNode *> searched;
-
-  cur_level.push_back(root);
-  int level = 1;
-
-  while (!cur_level.empty()) {
-    cout << "###############################" << endl;
-    cout << "# Level: " << level << endl;
-    cout << "###############################" << endl;
-
-    for (auto node : cur_level) {
-      PrintSAMNode(node);
-      for (char c = 'a'; c <= 'z'; ++c) {
-        auto child = node->children_[ToIdx(c)];
-        if (child && searched.count(child) == 0) {
-          next_level.push_back(child);
-          searched.insert(child);
-        }
-      }
-    }
-
-    cout << endl << endl;
-
-    swap(cur_level, next_level);
-    next_level.clear();
-    ++level;
-  }
-}
-
-
 void TopologySort(
-    SAMNode *node,
-    unordered_set<SAMNode *> &searched,
-    list<SAMNode *> &ret) {
+    State *node,
+    unordered_set<State *> &searched,
+    vector<State *> &nodes) {
 
   if (searched.count(node) > 0) {
     return;
   }
-
   searched.insert(node);
-  for (int idx = 0; idx < 26; ++idx) {
-    auto child = node->children_[idx];
-    if (child) {
-      TopologySort(child, searched, ret);
-    }
+
+  for (auto &tran : node->trans_) {
+    auto child = tran.second;
+    TopologySort(child, searched, nodes);
   }
-  ret.push_front(node);
+
+  nodes.push_back(node);
 }
 
 
-void CreateDOTSource(vector<SAMNode *> nodes) {
-  unordered_map<SAMNode *, string> max_substr, min_substr, node_id;
-  // init.
-  auto root = nodes.front();
-  min_substr[root] = max_substr[root] = "";
+void CreateDOTSource(const vector<State *> &nodes, const string &text) {
+
+  // init node id.
+  unordered_map<State *, string> node_id;
   for (int i = 0; i < nodes.size(); ++i) {
     node_id[nodes[i]] = "t" + to_string(i);
   }
@@ -173,30 +133,25 @@ void CreateDOTSource(vector<SAMNode *> nodes) {
 
   for (int i = 0; i < nodes.size(); ++i) {
     auto node = nodes[i];
+
     // transitions.
-    for (char c = 'a'; c <= 'z'; ++c) {
-      auto child = node->children_[ToIdx(c)];
-      if (child == nullptr) {
-        continue;
-      }
+    vector<pair<char, State *>> ordered_trans(
+        node->trans_.begin(), node->trans_.end()
+        );
+    sort(ordered_trans.begin(), ordered_trans.end());
+
+    for (auto &tran : ordered_trans) {
+      char c = tran.first;
+      auto child = tran.second;
+
       fout << "  " << node_id[node] << " -> " << node_id[child]
            << " [label=\"" << c << "\"]"
            << endl;
-
-      // update min_substr, max_substr.
-      if (max_substr.count(child) == 0
-          || max_substr[node].size() + 1 > max_substr[child].size()) {
-        max_substr[child] = max_substr[node] + string(1, c);
-      }
-      if (min_substr.count(child) == 0
-          || min_substr[node].size() + 1 < min_substr[child].size()) {
-        min_substr[child] = min_substr[node] + string(1, c);
-      }
     }
 
     // suffix link.
-    if (node->parent_) {
-      fout << "  " << node_id[node] << " -> " << node_id[node->parent_]
+    if (node->suffix_link_) {
+      fout << "  " << node_id[node] << " -> " << node_id[node->suffix_link_]
            << " [color=\"blue\"]"
            << endl;
     }
@@ -205,9 +160,17 @@ void CreateDOTSource(vector<SAMNode *> nodes) {
     fout << "  " << node_id[node]
          << " [label=\"";
     if (i == 0) {
-      fout << "nil";
+      fout << "empty";
     } else {
-      fout << max_substr[node] << "\\n" << min_substr[node];
+
+      auto longest = text.substr(
+          node->endpoint_ - node->max_length_ + 1,
+          node->max_length_);
+      auto shortest = text.substr(
+          node->endpoint_ - node->min_length_ + 1,
+          node->min_length_);
+
+      fout << longest << "\\n" << shortest;
     }
     fout << "\"]"
          << endl;
@@ -223,17 +186,18 @@ int main() {
   string s;
   fin >> s;
 
-  auto root = new SAMNode;
+  auto root = new State;
   auto last = root;
 
   for (char c : s) {
     last = AddedLastCharacterToSAM(root, last, c);
   }
 
-  PrintSAMTree(root);
+  unordered_set<State *> searched;
+  vector<State *> nodes;
 
-  unordered_set<SAMNode *> searched;
-  list<SAMNode *> ret;
-  TopologySort(root, searched, ret);
-  CreateDOTSource(vector<SAMNode *>(ret.begin(), ret.end()));
+  TopologySort(root, searched, nodes);
+  reverse(nodes.begin(), nodes.end());
+
+  CreateDOTSource(nodes, s);
 }
