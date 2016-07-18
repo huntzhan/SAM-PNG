@@ -38,64 +38,108 @@ ifstream fin(kInputFilename);
 ofstream fout(kOutputFilename);
 
 
-struct State {
-  // range of substrings.
-  int max_length_ = 0;
-  int min_length_ = 0;
+#define DEFINE_ACCESSOR_AND_MUTATOR(type, name) \
+  type name() {                                 \
+    return name ## _;                           \
+  }                                             \
+  void set_ ## name(type val) {                 \
+    name ## _ = val;                            \
+  }                                             \
 
-  // first endpoint.
-  int endpoint_ = -1;
 
-  // suffix link
-  State *suffix_link_ = nullptr;
+class State {
+ public:
+  using TransType = unordered_map<char, State *>;
 
-  // transitions a-z.
+  DEFINE_ACCESSOR_AND_MUTATOR(int, maxlen)
+  DEFINE_ACCESSOR_AND_MUTATOR(int, minlen)
+  DEFINE_ACCESSOR_AND_MUTATOR(int, first_endpos)
+  DEFINE_ACCESSOR_AND_MUTATOR(State *, link)
+  DEFINE_ACCESSOR_AND_MUTATOR(bool, accept)
+  DEFINE_ACCESSOR_AND_MUTATOR(TransType, trans)
+
+  bool has_trans(char c) const {
+    return trans_.count(c) > 0;
+  }
+  State *trans(char c) const {
+    return trans_.at(c);
+  }
+  void set_trans(char c, State *v) {
+    trans_[c] = v;
+  }
+
+ private:
+  int maxlen_ = 0;
+  int minlen_ = 0;
+  int first_endpos_ = -1;
+
+  State *link_ = nullptr;
   unordered_map<char, State *> trans_;
+
+  bool accept_ = false;
 };
 
 
-State *AddedLastCharacterToSAM(State *root, State *last, char c) {
+State *AddSymbolToSAM(State *start, State *last, char c) {
   auto cur = new State;
-  cur->max_length_ = last->max_length_ + 1;
-  cur->endpoint_ = last->endpoint_ + 1;
+  cur->set_maxlen(last->maxlen() + 1);
+  cur->set_first_endpos(last->first_endpos() + 1);
 
   auto p = last;
-  while (p && p->trans_.count(c) == 0) {
-    p->trans_[c] = cur;
-    cur->min_length_ = p->min_length_ + 1;
-    p = p->suffix_link_;
+  while (p && !p->has_trans(c)) {
+    p->set_trans(c, cur);
+    p = p->link();
   }
 
   if (p == nullptr) {
-    cur->suffix_link_ = root;
-  } else {
-    auto q = p->trans_[c];
-    if (p->max_length_ + 1 == q->max_length_) {
-      // continue.
-      cur->suffix_link_ = q;
-    } else {
-      // discontinue.
-      auto split_q = new State;
-
-      split_q->max_length_ = p->max_length_ + 1;
-      split_q->endpoint_ = q->endpoint_;
-
-      split_q->suffix_link_ = q->suffix_link_;
-      split_q->trans_ = q->trans_;
-
-      while (p && p->trans_.count(c) > 0 && p->trans_[c] == q) {
-        p->trans_[c] = split_q;
-        split_q->min_length_ = p->min_length_ + 1;
-        p = p->suffix_link_;
-      }
-
-      q->suffix_link_ = split_q;
-      q->min_length_ = split_q->max_length_ + 1;
-
-      cur->suffix_link_ = split_q;
-    }
+    cur->set_link(start);
+    cur->set_minlen(1);
+    return cur;
   }
+
+  auto q = p->trans(c);
+  if (p->maxlen() + 1 == q->maxlen()) {
+    cur->set_link(q);
+    cur->set_minlen(q->maxlen() + 1);
+  } else {
+    auto sq = new State;
+    sq->set_maxlen(p->maxlen() + 1);
+    sq->set_trans(q->trans());
+    sq->set_first_endpos(q->first_endpos());
+    
+    while (p && p->has_trans(c) && p->trans(c) == q) {
+      p->set_trans(c, sq);
+      p = p->link();
+    }
+
+    sq->set_link(q->link());
+    sq->set_minlen(sq->link()->maxlen() + 1);
+
+    q->set_link(sq);
+    q->set_minlen(sq->maxlen() + 1);
+
+    cur->set_link(sq);
+    cur->set_minlen(sq->maxlen() + 1);
+  }
+
   return cur;
+}
+
+
+State *CreateSAM(const string &T) {
+  auto start = new State;
+  auto last = start;
+
+  for (char c : T) {
+    last = AddSymbolToSAM(start, last, c);
+  }
+  
+  while (last != start) {
+    last->set_accept(true);
+    last = last->link();
+  }
+
+  return start;
 }
 
 
@@ -109,7 +153,7 @@ void TopologySort(
   }
   searched.insert(node);
 
-  for (auto &tran : node->trans_) {
+  for (auto &tran : node->trans()) {
     auto child = tran.second;
     TopologySort(child, searched, nodes);
   }
@@ -136,7 +180,7 @@ void CreateDOTSource(const vector<State *> &nodes, const string &text) {
 
     // transitions.
     vector<pair<char, State *>> ordered_trans(
-        node->trans_.begin(), node->trans_.end()
+        node->trans().begin(), node->trans().end()
         );
     sort(ordered_trans.begin(), ordered_trans.end());
 
@@ -150,8 +194,8 @@ void CreateDOTSource(const vector<State *> &nodes, const string &text) {
     }
 
     // suffix link.
-    if (node->suffix_link_) {
-      fout << "  " << node_id[node] << " -> " << node_id[node->suffix_link_]
+    if (node->link()) {
+      fout << "  " << node_id[node] << " -> " << node_id[node->link()]
            << " [color=\"blue\"]"
            << endl;
     }
@@ -164,11 +208,11 @@ void CreateDOTSource(const vector<State *> &nodes, const string &text) {
     } else {
 
       auto longest = text.substr(
-          node->endpoint_ - node->max_length_ + 1,
-          node->max_length_);
+          node->first_endpos() - node->maxlen() + 1,
+          node->maxlen());
       auto shortest = text.substr(
-          node->endpoint_ - node->min_length_ + 1,
-          node->min_length_);
+          node->first_endpos() - node->minlen() + 1,
+          node->minlen());
 
       fout << longest << "\\n" << shortest;
     }
@@ -183,21 +227,16 @@ void CreateDOTSource(const vector<State *> &nodes, const string &text) {
 
 
 int main() {
-  string s;
-  fin >> s;
+  string T;
+  fin >> T;
 
-  auto root = new State;
-  auto last = root;
-
-  for (char c : s) {
-    last = AddedLastCharacterToSAM(root, last, c);
-  }
+  auto start = CreateSAM(T);
 
   unordered_set<State *> searched;
   vector<State *> nodes;
 
-  TopologySort(root, searched, nodes);
+  TopologySort(start, searched, nodes);
   reverse(nodes.begin(), nodes.end());
 
-  CreateDOTSource(nodes, s);
+  CreateDOTSource(nodes, T);
 }
